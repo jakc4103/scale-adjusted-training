@@ -33,7 +33,7 @@ class CGPACTLayer(nn.Module):
         super(CGPACTLayer, self).__init__()
         self.num_bits = num_bits
         self.qmax = 2 ** num_bits
-        self.register_parameter('alpha', torch.ones(1)*10)
+        self.alpha = torch.nn.Parameter(torch.ones(1)*10)
 
     def forward(self, input):
         output = input.clone()
@@ -46,21 +46,20 @@ class CGPACTLayer(nn.Module):
 class CGPACT(Function):
     @staticmethod
     def forward(ctx, input, alpha, qmax):
-        ctx.save_for_backward(input)
-        ctx.save_for_backward(alpha)
-        input = (torch.abs(input) - torch.abs(input - alpha) + alpha) / 2
-        qinput = DirectQuant.apply(input/alpha, qmax)
-        ctx.save_for_backward(qinput)
+        output = input.clone()
+        output = (torch.abs(output) - torch.abs(output - alpha) + alpha) / 2
+        qoutput = DirectQuant.apply(output/alpha, qmax)
+        ctx.save_for_backward(input, alpha, qoutput)
 
-        return alpha*qinput
+        return alpha*qoutput
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, alpha, qinput = ctx.saved_tensors
+        input, alpha, qoutput = ctx.saved_tensors
         grad_input = grad_output.clone()
         grad_alpha = grad_output.clone()
 
-        grad_alpha[input < alpha] = qinput - input / alpha
+        grad_alpha[input < alpha] = (qoutput - input / alpha)[[input < alpha]]
         grad_alpha[input > alpha] = 1
 
         grad_input[input > alpha] = 0
@@ -107,7 +106,7 @@ class QConv2d(nn.Conv2d):
                  stride=1, padding=0, dilation=1, groups=1, bias=True, num_bits=8, quant_scale=False):
         super(QConv2d, self).__init__(in_channels, out_channels, kernel_size,
                                       stride, padding, dilation, groups, bias)
-        self.num_bits = num_bits
+        # self.num_bits = num_bits
         self.quant = DoReFaQuantizeLayer(num_bits=num_bits, quant_scale=quant_scale)
 
 
@@ -124,7 +123,7 @@ class QLinear(nn.Linear):
     """docstring for QLinear."""
     def __init__(self, in_features, out_features, bias=True, num_bits=8, quant_scale=False):
         super(QLinear, self).__init__(in_features, out_features, bias)
-        self.num_bits = num_bits
+        # self.num_bits = num_bits
         self.quant = DoReFaQuantizeLayer(num_bits=num_bits, quant_scale=quant_scale)
 
 
