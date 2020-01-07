@@ -17,3 +17,4 @@ This repo implement the Scale-Adjusted Training from [Towards Efficient Training
 ## Acknowledgement
   - https://github.com/marvis/pytorch-mobilenet  
   - https://github.com/tonylins/pytorch-mobilenet-v2
+  - https://github.com/ricky40403/PyTransformer/tree/hotfix

@@ -15,6 +15,7 @@ import torchvision.models as models
 from tensorboardX  import SummaryWriter
 from tqdm import tqdm
 
+from models import MobileNetv1, MobileNetV2
 from quantize import QConv2d, QLinear, CGPACTLayer, DoReFaQuantizeLayer
 from PyTransformer.transformers.torchTransformer import TorchTransformer
 
@@ -27,13 +28,13 @@ model_names.append('mobilenet')
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('--data', default='/home/jakc4103/windows/Toshiba/workspace/dataset/ILSVRC/Data/CLS-LOC/',
                     help='path to dataset')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='mobilenetv1',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: resnet18)')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
-                    help='number of data loading workers (default: 4)')
+                        ' (default: mobilenetv1)')
+parser.add_argument('-j', '--workers', default=6, type=int, metavar='N',
+                    help='number of data loading workers (default: 6)')
 parser.add_argument('--epochs', default=150, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -57,57 +58,16 @@ parser.add_argument('--pretrained', dest='pretrained', action='store_true',
 parser.add_argument('--logdir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/tensorboard', type=str,
                     help='path to save tensorboard logs')
 
-parser.add_argument('--savedir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/vanilla', type=str,
+parser.add_argument('--savedir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/quant', type=str,
                     help='path to save model weights')
+
+parser.add_argument('--lmdbdir', default='/home/jakc4103/windows/Toshiba/workspace/dataset/ILSVRC/lmdb/trainval/', type=str,
+                    help='path to lmdb dataset')
+
+parser.add_argument('--lmdb', action='store_true', help='use lmdb to trainval')
 
 best_prec1 = 0
 
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-
-        def conv_bn(inp, oup, stride):
-            return nn.Sequential(
-                nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
-                nn.BatchNorm2d(oup),
-                nn.ReLU(inplace=True)
-            )
-
-        def conv_dw(inp, oup, stride):
-            return nn.Sequential(
-                nn.Conv2d(inp, inp, 3, stride, 1, groups=inp, bias=False),
-                nn.BatchNorm2d(inp),
-                nn.ReLU(inplace=True),
-    
-                nn.Conv2d(inp, oup, 1, 1, 0, bias=False),
-                nn.BatchNorm2d(oup),
-                nn.ReLU(inplace=True),
-            )
-
-        self.model = nn.Sequential(
-            conv_bn(  3,  32, 2), 
-            conv_dw( 32,  64, 1),
-            conv_dw( 64, 128, 2),
-            conv_dw(128, 128, 1),
-            conv_dw(128, 256, 2),
-            conv_dw(256, 256, 1),
-            conv_dw(256, 512, 2),
-            conv_dw(512, 512, 1),
-            conv_dw(512, 512, 1),
-            conv_dw(512, 512, 1),
-            conv_dw(512, 512, 1),
-            conv_dw(512, 512, 1),
-            conv_dw(512, 1024, 2),
-            conv_dw(1024, 1024, 1),
-            nn.AvgPool2d(7),
-        )
-        self.fc = nn.Linear(1024, 1000)
-
-    def forward(self, x):
-        x = self.model(x)
-        x = x.view(-1, 1024)
-        x = self.fc(x)
-        return x
 
 def set_module_bits(model, num_bits):
         for module_name in model._modules:			
@@ -131,8 +91,15 @@ def main():
     args = parser.parse_args()
 
     # create model
-    model = torch.nn.DataParallel(Net())
-    model.load_state_dict(torch.load("mobilenet_sgd_rmsprop_69.526.tar")['state_dict'])
+    if args.arch == 'mobilenetv1':
+        model = torch.nn.DataParallel(MobileNetv1())
+        model.load_state_dict(torch.load("trained_weights/mobilenet_sgd_rmsprop_69.526.tar")['state_dict'])
+    elif args.arch == 'mobilenetv2':
+        model = MobileNetV2(width_mult=1)
+        state_dict = torch.load("trained_weights/mobilenetv2_1.0-f2a8633.pth.tar")
+        model.load_state_dict(state_dict)
+    else:
+        raise "Model arch not supported"
 
     transformer = TorchTransformer()
     transformer.register(torch.nn.ReLU, CGPACTLayer)
@@ -173,25 +140,43 @@ def main():
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
+    if args.lmdb:
+        from dataset import ImagenetLMDBDataset
+        train_dataset = ImagenetLMDBDataset(args.lmdbdir, transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.2, 1.0)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ]), ['data', 'label'])
+        val_dataset = ImagenetLMDBDataset(args.lmdbdir, transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                normalize,
+            ]), ['vdata', 'vlabel'])
+    else:
+        train_dataset = datasets.ImageFolder(traindir, transforms.Compose([
+                transforms.RandomResizedCrop(224, scale=(0.2, 1.0)),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize,
+            ]))
+        val_dataset = datasets.ImageFolder(valdir, transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                normalize,
+            ]))
+
     train_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(traindir, transforms.Compose([
-            transforms.RandomResizedCrop(224, scale=(0.2, 1.0)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ])),
+        train_dataset,
         batch_size=args.batch_size, shuffle=True,
-        num_workers=10, pin_memory=True)
+        num_workers=args.workers, pin_memory=True)
 
     val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
+        val_dataset,
         batch_size=args.batch_size, shuffle=False,
-        num_workers=8, pin_memory=True)
+        num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
         validate(val_loader, model, criterion)

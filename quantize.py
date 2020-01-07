@@ -36,9 +36,7 @@ class CGPACTLayer(nn.Module):
         self.alpha = torch.nn.Parameter(torch.ones(1)*10)
 
     def forward(self, input):
-        output = input.clone()
-
-        output = CGPACT.apply(output, self.alpha, self.qmax)
+        output = CGPACT.apply(input, self.alpha, self.qmax)
 
         return output
 
