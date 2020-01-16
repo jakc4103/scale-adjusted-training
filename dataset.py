@@ -27,7 +27,7 @@ class ImagenetLMDBDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         # Read image, jpeg lmdb version
         img = np.fromstring(self.txn.get(str(idx).encode(), db=self.data_db), dtype=np.uint8)
-        img = cv2.imdecode(img, cv2.IMREAD_COLOR)[:,:,[2,1,0]] # BRG to RGB
+        img = cv2.imdecode(img, cv2.IMREAD_COLOR)[:,:,[2,1,0]] # BGR to RGB
 
         label = self.txn.get(str(idx).encode(), db=self.label_db)
         

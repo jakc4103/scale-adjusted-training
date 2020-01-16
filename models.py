@@ -1,10 +1,11 @@
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint, checkpoint_sequential
 import math
 
 class MobileNetv1(nn.Module):
-    def __init__(self):
+    def __init__(self, save_grad):
         super(MobileNetv1, self).__init__()
-
+        self.save_grad = save_grad
         def conv_bn(inp, oup, stride):
             return nn.Sequential(
                 nn.Conv2d(inp, oup, 3, stride, 1, bias=False),
@@ -43,7 +44,11 @@ class MobileNetv1(nn.Module):
         self.fc = nn.Linear(1024, 1000)
 
     def forward(self, x):
-        x = self.model(x)
+        if self.save_grad:
+            x = checkpoint_sequential(self.model, 9, x)
+        else:
+            x = self.model(x)
+        
         x = x.view(-1, 1024)
         x = self.fc(x)
         return x

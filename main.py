@@ -39,7 +39,7 @@ parser.add_argument('--epochs', default=150, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=110, type=int,
+parser.add_argument('-b', '--batch-size', default=256, type=int,
                     metavar='N', help='mini-batch size ')
 parser.add_argument('--lr', '--learning-rate', default=0.05, type=float,
                     metavar='LR', help='initial learning rate')
@@ -55,16 +55,18 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
-parser.add_argument('--logdir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/tensorboard', type=str,
+parser.add_argument('--logdir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/clamp/tensorboard', type=str,
                     help='path to save tensorboard logs')
 
-parser.add_argument('--savedir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/quant', type=str,
+parser.add_argument('--savedir', default='/home/jakc4103/windows/Toshiba/workspace/imagenet/model/clamp', type=str,
                     help='path to save model weights')
 
-parser.add_argument('--lmdbdir', default='/home/jakc4103/windows/Toshiba/workspace/dataset/ILSVRC/lmdb/trainval/', type=str,
-                    help='path to lmdb dataset')
+parser.add_argument('--lmdbdir', default='/home/jakc4103/windows/Toshiba/workspace/dataset/ILSVRC/lmdb/trainval/', type=str, help='path to lmdb dataset')
 
 parser.add_argument('--lmdb', action='store_true', help='use lmdb to trainval')
+parser.add_argument('--quant', action='store_true', help='use quantize')
+parser.add_argument('--clamp', action='store_true', help='clamp weight')
+parser.add_argument('--save_grad', action='store_true', help='whether to use torch.utils.checkpoint to save gpu memory')
 
 best_prec1 = 0
 
@@ -73,17 +75,17 @@ def set_module_bits(model, num_bits):
         for module_name in model._modules:			
             # has children
             if type(model._modules[module_name]) == QConv2d:
-                model._modules[module_name].quant = DoReFaQuantizeLayer(num_bits=num_bits, quant_scale=False)
+                model._modules[module_name].quant = DoReFaQuantizeLayer(num_bits=num_bits, quant=True, quant_scale=False)
 
             elif type(model._modules[module_name]) == QLinear:
-                model._modules[module_name].quant = DoReFaQuantizeLayer(num_bits=num_bits, quant_scale=True)
+                model._modules[module_name].quant = DoReFaQuantizeLayer(num_bits=num_bits, quant=True, quant_scale=True)
 
             elif len(model._modules[module_name]._modules) > 0:
                 set_module_bits(model._modules[module_name], num_bits)
 
             else:
                 if type(model._modules[module_name]) == CGPACTLayer:
-                    model._modules[module_name].__init__(num_bits=num_bits)
+                    model._modules[module_name].__init__(num_bits=num_bits, quant=True)
 
 
 def main():
@@ -92,8 +94,10 @@ def main():
 
     # create model
     if args.arch == 'mobilenetv1':
-        model = torch.nn.DataParallel(MobileNetv1())
+        model = torch.nn.DataParallel(MobileNetv1(args.save_grad))
         model.load_state_dict(torch.load("trained_weights/mobilenet_sgd_rmsprop_69.526.tar")['state_dict'])
+        if type(model) == torch.nn.DataParallel and args.save_grad:
+            model = model.module
     elif args.arch == 'mobilenetv2':
         model = MobileNetV2(width_mult=1)
         state_dict = torch.load("trained_weights/mobilenetv2_1.0-f2a8633.pth.tar")
@@ -101,14 +105,15 @@ def main():
     else:
         raise "Model arch not supported"
 
-    transformer = TorchTransformer()
-    transformer.register(torch.nn.ReLU, CGPACTLayer)
-    model = transformer.trans_layers(model, False)
-    transformer.register(torch.nn.Conv2d, QConv2d)
-    transformer.register(torch.nn.Linear, QLinear)
-    model = transformer.trans_layers(model, True)
-    
-    set_module_bits(model, 4)
+    if args.quant or args.clamp:
+        transformer = TorchTransformer()
+        transformer.register(torch.nn.Conv2d, QConv2d)
+        transformer.register(torch.nn.Linear, QLinear)
+        model = transformer.trans_layers(model, True)
+        if args.quant:
+            transformer.register(torch.nn.ReLU, CGPACTLayer)
+            model = transformer.trans_layers(model, False)
+            set_module_bits(model, 4)
 
     model = model.cuda()
     # define loss function (criterion) and optimizer
@@ -117,7 +122,7 @@ def main():
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
-    lr_schedular = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 150, eta_min=0, last_epoch=-1)
+    lr_schedular = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.epochs, eta_min=0, last_epoch=-1)
    # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
@@ -179,7 +184,7 @@ def main():
         num_workers=args.workers, pin_memory=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion)
+        validate(val_loader, model, criterion, 0, None)
         return
 
     if not os.path.exists(args.logdir):
@@ -207,6 +212,8 @@ def main():
         }, is_best, filename=os.path.join(args.savedir, 'checkpoint.pth.tar'))
 
         lr_schedular.step()
+
+    os.system("echo \"training done.\" | mail -s \"Desktop Notify\" jakc4103@gmail.com")
 
 
 def train(train_loader, model, criterion, optimizer, epoch, writer):
@@ -275,20 +282,18 @@ def validate(val_loader, model, criterion, epoch, writer):
             output = model(input_var)
             loss = criterion(output, target_var)
 
-            tbar.set_description("loss: {}, top1: {}, top5: {}, epoch: {}".format(loss.data, top1.avg, top5.avg, epoch))
-
             # measure accuracy and record loss
             prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
             losses.update(loss.data, input.size(0))
             top1.update(prec1, input.size(0))
             top5.update(prec5, input.size(0))
-
+            tbar.set_description("loss: {}, top1: {}, top5: {}, epoch: {}".format(loss.data, top1.avg, top5.avg, epoch))
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
-
-        writer.add_scalar("val/acc/top1", top1.avg, epoch)
-        writer.add_scalar("val/acc/top5", top5.avg, epoch)
+        if writer is not None:
+            writer.add_scalar("val/acc/top1", top1.avg, epoch)
+            writer.add_scalar("val/acc/top5", top5.avg, epoch)
 
     return top1.avg
 
@@ -296,7 +301,7 @@ def validate(val_loader, model, criterion, epoch, writer):
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, filename.replace('checkpoint.pth.tar', 'model_best.pth.tar'))
 
 
 class AverageMeter(object):

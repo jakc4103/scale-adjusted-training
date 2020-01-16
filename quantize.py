@@ -29,24 +29,27 @@ class DirectQuant(InplaceFunction):
 
 
 class CGPACTLayer(nn.Module):
-    def __init__(self, num_bits=8):
+    def __init__(self, num_bits=8, quant=False):
         super(CGPACTLayer, self).__init__()
         self.num_bits = num_bits
+        self.quant_flag = quant
         self.qmax = 2 ** num_bits
-        self.alpha = torch.nn.Parameter(torch.ones(1)*10)
+        self.alpha = torch.nn.Parameter(torch.ones(1)*100).float()
 
     def forward(self, input):
-        output = CGPACT.apply(input, self.alpha, self.qmax)
-
+        output = CGPACT.apply(input, self.alpha, self.qmax, self.quant_flag)
         return output
 
 
 class CGPACT(Function):
     @staticmethod
-    def forward(ctx, input, alpha, qmax):
+    def forward(ctx, input, alpha, qmax, quant_flag):
         output = input.clone()
         output = (torch.abs(output) - torch.abs(output - alpha) + alpha) / 2
-        qoutput = DirectQuant.apply(output/alpha, qmax)
+        if quant_flag:
+            qoutput = DirectQuant.apply(output/alpha, qmax)
+        else:
+            qoutput = output/alpha
         ctx.save_for_backward(input, alpha, qoutput)
 
         return alpha*qoutput
@@ -58,12 +61,12 @@ class CGPACT(Function):
         grad_alpha = grad_output.clone()
 
         grad_alpha[input < alpha] = (qoutput - input / alpha)[[input < alpha]]
-        grad_alpha[input > alpha] = 1
+        grad_alpha[input >= alpha] = 1
 
         grad_input[input > alpha] = 0
         grad_input[input < 0] = 0
 
-        return grad_input, grad_alpha, None
+        return grad_input, grad_alpha, None, None
 
 
 class DoReFaQuantizeLayer(nn.Module):
@@ -71,9 +74,10 @@ class DoReFaQuantizeLayer(nn.Module):
     Perform quantizatin of DoReFa paper on input tensor
 
     """
-    def __init__(self, num_bits=8, quant_scale=False):
+    def __init__(self, num_bits=8, quant=False, quant_scale=False):
         super(DoReFaQuantizeLayer, self).__init__()
         self.num_bits = 8
+        self.quant_flag = quant
         self.qmax = 2 ** num_bits
         self.quant_scale = quant_scale
 
@@ -84,7 +88,8 @@ class DoReFaQuantizeLayer(nn.Module):
         output = (torch.tanh(output) / torch.max(torch.abs(torch.tanh(output.detach()))) + 1) / 2
 
         # quantize and dequant
-        output = DirectQuant.apply(output, self.qmax)
+        if self.quant_flag:
+            output = DirectQuant.apply(output, self.qmax)
 
         # scale back
         output = 2 * output - 1
@@ -101,11 +106,11 @@ class QConv2d(nn.Conv2d):
     """docstring for QConv2d."""
 
     def __init__(self, in_channels, out_channels, kernel_size,
-                 stride=1, padding=0, dilation=1, groups=1, bias=True, num_bits=8, quant_scale=False):
+                 stride=1, padding=0, dilation=1, groups=1, bias=True, num_bits=8, quant=False, quant_scale=False):
         super(QConv2d, self).__init__(in_channels, out_channels, kernel_size,
                                       stride, padding, dilation, groups, bias)
         # self.num_bits = num_bits
-        self.quant = DoReFaQuantizeLayer(num_bits=num_bits, quant_scale=quant_scale)
+        self.quant = DoReFaQuantizeLayer(num_bits=num_bits, quant=quant, quant_scale=quant_scale)
 
 
     def forward(self, input):
@@ -119,10 +124,10 @@ class QConv2d(nn.Conv2d):
 
 class QLinear(nn.Linear):
     """docstring for QLinear."""
-    def __init__(self, in_features, out_features, bias=True, num_bits=8, quant_scale=False):
+    def __init__(self, in_features, out_features, bias=True, num_bits=8, quant=False, quant_scale=False):
         super(QLinear, self).__init__(in_features, out_features, bias)
         # self.num_bits = num_bits
-        self.quant = DoReFaQuantizeLayer(num_bits=num_bits, quant_scale=quant_scale)
+        self.quant = DoReFaQuantizeLayer(num_bits=num_bits, quant=quant, quant_scale=quant_scale)
 
 
     def forward(self, input):
